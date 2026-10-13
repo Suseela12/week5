@@ -1,0 +1,199 @@
+!pip install -q google-genai pandas
+-----------------------------------------------------------------------
+from google.colab import userdata
+from google import genai
+import time
+
+api_key = userdata.get("GEMINI_API_KEY")
+client = genai.Client(api_key=api_key)
+
+MODEL = "gemini-3.8-flash"
+
+print("Gemini API connected successfully!")
+---------------------------------------------------------------------------
+def run_prompt(prompt):
+    for attempt in range(5):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config={"temperature": 0}
+            )
+            return response.text.strip() if response.text else "No response"
+
+        except Exception as e:
+            error = str(e)
+
+            if ("503" in error or "UNAVAILABLE" in error) and attempt < 4:
+                time.sleep(2 ** attempt)
+            else:
+                return "ERROR: " + error
+    -------------------------------------------------------------------------------
+    reviews = [
+    "The battery life is amazing!",
+    "It works, nothing special.",
+    "The screen is too small.",
+    "Excellent camera and fast performance.",
+    "The phone stopped working after two days."
+]
+
+ground_truth = [
+    "Positive",
+    "Neutral",
+    "Negative",
+    "Positive",
+    "Negative"
+]
+
+print("Test reviews created:", len(reviews))
+-------------------------------------------------------------------------------------
+def zero_shot_prompt(review):
+    return f"""
+Classify the following customer review as exactly one label:
+Positive, Neutral, or Negative.
+
+Return only the label. Do not explain your answer.
+
+Review: "{review}"
+Label:
+"""
+-----------------------------------------------------------------------------
+def few_shot_prompt(review):
+    return f"""
+Classify each customer review as Positive, Neutral, or Negative.
+Return only one label, without explanation.
+
+Examples:
+Review: "Best phone ever!"
+Label: Positive
+
+Review: "The camera is slow."
+Label: Negative
+
+Review: "Average quality, nothing special."
+Label: Neutral
+
+Now classify this review:
+Review: "{review}"
+Label:
+"""
+------------------------------------------------------------------------------------
+zero_results = []
+few_results = []
+quota_exceeded = False
+
+for review in reviews:
+    if quota_exceeded:
+        zero_results.append("NOT RUN")
+        few_results.append("NOT RUN")
+        continue
+
+    zero_answer = run_prompt(zero_shot_prompt(review))
+
+    if "429" in zero_answer or "RESOURCE_EXHAUSTED" in zero_answer:
+        print("Gemini API quota exhausted.")
+        zero_results.append("NOT RUN")
+        few_results.append("NOT RUN")
+        quota_exceeded = True
+        continue
+
+    few_answer = run_prompt(few_shot_prompt(review))
+
+    if "429" in few_answer or "RESOURCE_EXHAUSTED" in few_answer:
+        print("Gemini API quota exhausted.")
+        zero_results.append(zero_answer)
+        few_results.append("NOT RUN")
+        quota_exceeded = True
+        continue
+
+    zero_results.append(zero_answer)
+    few_results.append(few_answer)
+
+    print("\nReview:", review)
+    print("Zero-shot:", zero_answer)
+    print("Few-shot:", few_answer)
+
+if quota_exceeded:
+    print("\nSome reviews were not processed.")
+    print("Resume the experiment when quota is available.")
+    ---------------------------------------------------------------------------------------
+    def clean_label(response):
+    text = response.strip().lower()
+
+    for label in ["positive", "neutral", "negative"]:
+        if text == label:
+            return label.title()
+
+    # Handle responses such as "Label: Positive"
+    for label in ["positive", "neutral", "negative"]:
+        if label in text and len(text.split()) <= 5:
+            return label.title()
+
+    return "Invalid"
+
+zero_labels = [clean_label(x) for x in zero_results]
+few_labels = [clean_label(x) for x in few_results]
+
+print("Labels cleaned successfully.")
+----------------------------------------------------------------------------------------
+import pandas as pd
+
+results = pd.DataFrame({
+    "Review": reviews,
+    "Actual Label": ground_truth,
+    "Zero-Shot": zero_labels,
+    "Few-Shot": few_labels
+})
+
+results["Zero-Shot Correct"] = (
+    results["Zero-Shot"] == results["Actual Label"]
+)
+
+results["Few-Shot Correct"] = (
+    results["Few-Shot"] == results["Actual Label"]
+)
+
+display(results)
+---------------------------------------------------------------------------------
+zero_accuracy = (
+    results["Zero-Shot Correct"].sum() / len(reviews)
+) * 100
+
+few_accuracy = (
+    results["Few-Shot Correct"].sum() / len(reviews)
+) * 100
+
+zero_format = (
+    results["Zero-Shot"].isin(["Positive", "Neutral", "Negative"]).sum()
+    / len(reviews)
+) * 100
+
+few_format = (
+    results["Few-Shot"].isin(["Positive", "Neutral", "Negative"]).sum()
+    / len(reviews)
+) * 100
+
+comparison = pd.DataFrame({
+    "Metric": ["Accuracy", "Format Adherence"],
+    "Zero-Shot (%)": [zero_accuracy, zero_format],
+    "Few-Shot (%)": [few_accuracy, few_format]
+})
+
+display(comparison.round(2))
+----------------------------------------------------------------------------
+agreement = (
+    results["Zero-Shot"] == results["Few-Shot"]
+).sum() / len(reviews) * 100
+
+print(f"Zero-shot accuracy: {zero_accuracy:.2f}%")
+print(f"Few-shot accuracy: {few_accuracy:.2f}%")
+print(f"Zero-shot format adherence: {zero_format:.2f}%")
+print(f"Few-shot format adherence: {few_format:.2f}%")
+print(f"Agreement between methods: {agreement:.2f}%")
+
+if few_accuracy > zero_accuracy:
+    print("\nFew-shot prompting performed better on this test set.")
+elif zero_accuracy > few_accuracy:
+    print("\nZero-shot prompting performed better on this test set.")
+else:
+    print("\nBoth methods achieved the same accuracy.")
